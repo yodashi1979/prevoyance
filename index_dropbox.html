@@ -5209,7 +5209,7 @@ input {
 }
 
 :root[data-theme=dark] .accueil-scene {
-    background-image: url(./Prévoyance-Night.png)
+    background-image: url(./Prevoyance-Night.png)
 }
 
 :root[data-theme=light] .accueil-scene {
@@ -14102,7 +14102,7 @@ img,svg,canvas,video{max-width:100%}
 /* === Fond d'écran global : image jour/nuit présente dans toutes les fenêtres === */
 body::before,body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:-1}
 body::before{background:#05080f 50% 30%/cover no-repeat}
-:root[data-theme=dark] body::before{background-image:url(./Prévoyance-Night.png)}
+:root[data-theme=dark] body::before{background-image:url(./Prevoyance-Night.png)}
 :root[data-theme=light] body::before{background-color:#eef2f8;background-image:url(./Prévoyance-Day.png)}
 :root[data-theme=dark] body::after{background:linear-gradient(180deg,#05080f8c,#05080fc7)}
 :root[data-theme=light] body::after{background:linear-gradient(180deg,#eef2f89e,#eef2f8db)}
@@ -14496,18 +14496,52 @@ addEventListener('pointerdown',()=>{if(gPend&&G.on()){gPend=false;gAuto()}},{pas
 addEventListener('load',()=>{if(G.on())setTimeout(gAuto,5000)});
 window.__capBackup={saveBackup,shareBackup,restoreBackup};
 
-// ---- Sauvegarde Dropbox (dossier de l'appli, OAuth implicite) ----
-const DB={key:()=>LS('cap-db-key')||'',on:()=>LS('cap-db-on')==='1',tok:()=>{try{const o=JSON.parse(LS('cap-db-tok')||'null');return o&&o.e>Date.now()+60000?o.t:null}catch(e){return null}}};
+// ---- Sauvegarde Dropbox (PKCE + refresh token, web et Capacitor) ----
+const DB={key:()=>LS('cap-db-key')||'',on:()=>LS('cap-db-on')==='1',ok:()=>!!LS('cap-db-refresh')};
 const DBP='/prevoyance-sauvegarde.json';
 let dbTimer,dbStat=()=>{};
-function dbConnect(){const k=DB.key();if(!k)throw new Error('Colle d’abord ta clé d’application Dropbox.');
-  location.href='https://www.dropbox.com/oauth2/authorize?client_id='+encodeURIComponent(k)+'&response_type=token&state=dbx&redirect_uri='+encodeURIComponent(LS('cap-db-uri')||location.origin+location.pathname)}
-(function(){const h=new URLSearchParams(location.hash.slice(1));if(h.get('state')==='dbx'&&h.get('access_token')){
-  LS('cap-db-tok',JSON.stringify({t:h.get('access_token'),e:Date.now()+Number(h.get('expires_in')||14400)*1000}));LS('cap-db-on','1');history.replaceState(null,'',location.pathname+location.search)}})();
-async function dbFetch(url,arg,body){const t=DB.tok();if(!t)throw new Error('Connexion Dropbox expirée, reconnecte-toi.');
+const isNative=()=>!!(window.Capacitor&&window.Capacitor.isNativePlatform&&window.Capacitor.isNativePlatform());
+const dbRedirect=()=>isNative()?'db-'+DB.key()+'://2/token':(LS('cap-db-uri')||location.origin+location.pathname);
+const b64u=buf=>btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+async function dbConnect(){const k=DB.key();if(!k){dbStat('Colle d’abord ta clé d’application Dropbox.',1);return}
+  dbStat('Étape 1/3 : mode '+(isNative()?'Android (APK)':'web')+', clé '+k.slice(0,4)+'…');
+  const a=new Uint8Array(32);crypto.getRandomValues(a);const v=b64u(a);LS('cap-db-verifier',v);
+  dbStat('Étape 2/3 : préparation de la connexion…');
+  const c=b64u(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(v)));
+  const url='https://www.dropbox.com/oauth2/authorize?'+new URLSearchParams({client_id:k,response_type:'code',code_challenge:c,code_challenge_method:'S256',token_access_type:'offline',redirect_uri:dbRedirect()});
+  dbStat('Étape 3/3 : ouverture de Dropbox…');
+  if(isNative()){const B=window.Capacitor.Plugins.Browser;if(!B)throw new Error('plugin Browser absent : npm install @capacitor/browser, puis npx cap sync et recompile l’APK');await B.open({url})}else location.href=url}
+async function dbExchange(code){
+  try{const r=await fetch('https://api.dropboxapi.com/oauth2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({code,grant_type:'authorization_code',code_verifier:LS('cap-db-verifier')||'',client_id:DB.key(),redirect_uri:dbRedirect()})});
+    if(!r.ok)throw new Error('échange refusé (HTTP '+r.status+')');const d=await r.json();
+    LS('cap-db-refresh',d.refresh_token);LS('cap-db-access',JSON.stringify({t:d.access_token,e:Date.now()+d.expires_in*1000}));
+    LS('cap-db-on','1');LS('cap-db-verifier','');setTimeout(dbAuto,3000);
+  }catch(e){LS('cap-db-err','Connexion Dropbox : '+e.message)}
+  setTimeout(()=>{const e=LS('cap-db-err');if(e){dbStat(e,1);LS('cap-db-err','')}},1500)}
+(function(){const code=new URLSearchParams(location.search).get('code');if(code){history.replaceState(null,'',location.pathname);dbExchange(code)}})();
+if(isNative()&&window.Capacitor.Plugins.App){window.Capacitor.Plugins.App.addListener('appUrlOpen',async({url})=>{
+  if(!url||!url.startsWith('db-'))return;try{await window.Capacitor.Plugins.Browser.close()}catch(e){}
+  const code=new URL(url).searchParams.get('code');if(code)dbExchange(code)})}
+async function dbToken(){const c=JSON.parse(LS('cap-db-access')||'null');if(c&&c.e>Date.now()+60000)return c.t;
+  const r=await fetch('https://api.dropboxapi.com/oauth2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',refresh_token:LS('cap-db-refresh')||'',client_id:DB.key()})});
+  if(!r.ok){LS('cap-db-refresh','');LS('cap-db-on','0');throw new Error('Reconnexion Dropbox nécessaire')}
+  const d=await r.json();LS('cap-db-access',JSON.stringify({t:d.access_token,e:Date.now()+d.expires_in*1000}));return d.access_token}
+async function dbFetch(url,arg,body){const t=await dbToken();
   const r=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+t,'Dropbox-API-Arg':JSON.stringify(arg),...(body?{'Content-Type':'application/octet-stream'}:{})},body});
-  if(!r.ok){const txt=await r.text().catch(()=>'');if(r.status===401)LS('cap-db-tok','');throw new Error('Dropbox : HTTP '+r.status+' '+txt.slice(0,300))}return r}
-async function dbUp(){const f=await makeBackup();await dbFetch('https://content.dropboxapi.com/2/files/upload',{path:DBP,mode:'overwrite',mute:true},f);LS('cap-db-last',new Date().toLocaleString('fr-FR'))}
+  if(!r.ok){const txt=await r.text().catch(()=>'');if(r.status===401)LS('cap-db-access','');throw new Error('Dropbox : HTTP '+r.status+' '+txt.slice(0,300))}return r}
+async function dbRpc(url,obj){const t=await dbToken();const r=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+t,'Content-Type':'application/json'},body:JSON.stringify(obj)});if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}
+async function dbUp(){const f=await makeBackup();
+  await dbFetch('https://content.dropboxapi.com/2/files/upload',{path:DBP,mode:'overwrite',mute:true},f);
+  LS('cap-db-last',new Date().toLocaleString('fr-FR'));
+  /* Copie quotidienne datée, une fois par jour, et suppression de la copie vieille de 30 jours */
+  const today=new Date().toLocaleDateString('sv-SE');
+  if(LS('cap-db-daily')!==today){
+    await dbFetch('https://content.dropboxapi.com/2/files/upload',{path:'/prevoyance-'+today+'.json',mode:'overwrite',mute:true},f);
+    LS('cap-db-daily',today);
+    const old=new Date(Date.now()-30*864e5).toLocaleDateString('sv-SE');
+    await dbRpc('https://api.dropboxapi.com/2/files/delete_v2',{path:'/prevoyance-'+old+'.json'}).catch(()=>{});
+  }
+}
 async function dbDown(){const r=await dbFetch('https://content.dropboxapi.com/2/files/download',{path:DBP});return new File([await r.blob()],'prevoyance-sauvegarde.json',{type:'application/json'})}
 async function dbAuto(){if(!DB.on())return;try{await dbUp();dbStat('Dernière sauvegarde Dropbox : '+LS('cap-db-last'))}catch(e){dbStat('Sauvegarde Dropbox en attente ('+e.message+')',1)}}
 function dbSched(){if(DB.on()){clearTimeout(dbTimer);dbTimer=setTimeout(dbAuto,30000)}}
@@ -14547,9 +14581,9 @@ function ui(){
  q('#bk-gres').onclick=async()=>{try{LS('cap-g-cid',q('#bk-cid').value.trim());await gToken(true);const f=await gDown();if(!confirm('Remplacer toutes les données actuelles par la sauvegarde Drive ?'))return;await restoreBackup(f);gm('Données restaurées, rechargement…');setTimeout(()=>location.reload(),600)}catch(e){gm(e.message,1)}};
  const dm=(t,e)=>{const m=q('#bk-dmsg');m.textContent=t;m.style.color=e?'#ff8a8a':'#7ee0b0'};dbStat=dm;
  const dRef=()=>{q('#bk-duriIn').value=LS('cap-db-uri')||location.origin+location.pathname;q('#bk-dkey').value=DB.key();q('#bk-don').textContent=DB.on()?'Désactiver la sauvegarde auto':'Connecter Dropbox';if(DB.on()&&LS('cap-db-last'))dm('Dernière sauvegarde Dropbox : '+LS('cap-db-last'))};dRef();
- q('#bk-don').onclick=()=>{try{if(DB.on()){LS('cap-db-on','0');clearTimeout(dbTimer);dRef();dm('Sauvegarde auto désactivée.');return}LS('cap-db-key',q('#bk-dkey').value.trim());LS('cap-db-uri',q('#bk-duriIn').value.trim());dbConnect()}catch(e){dm(e.message,1)}};
- q('#bk-dnow').onclick=async()=>{try{if(!DB.tok()){LS('cap-db-key',q('#bk-dkey').value.trim());LS('cap-db-uri',q('#bk-duriIn').value.trim());dbConnect();return}await dbUp();dm('Sauvegardé : '+LS('cap-db-last'))}catch(e){dm(e.message,1)}};
- q('#bk-dres').onclick=async()=>{try{if(!DB.tok()){LS('cap-db-key',q('#bk-dkey').value.trim());LS('cap-db-uri',q('#bk-duriIn').value.trim());dbConnect();return}const f=await dbDown();if(!confirm('Remplacer toutes les données actuelles par la sauvegarde Dropbox ?'))return;await restoreBackup(f);dm('Données restaurées, rechargement…');setTimeout(()=>location.reload(),600)}catch(e){dm(e.message,1)}};
+ q('#bk-don').onclick=()=>{try{if(DB.on()){LS('cap-db-on','0');clearTimeout(dbTimer);dRef();dm('Sauvegarde auto désactivée.');return}LS('cap-db-key',q('#bk-dkey').value.trim());LS('cap-db-uri',q('#bk-duriIn').value.trim());dbConnect().catch(e=>dm(e.message,1))}catch(e){dm(e.message,1)}};
+ q('#bk-dnow').onclick=async()=>{try{if(!DB.ok()){LS('cap-db-key',q('#bk-dkey').value.trim());LS('cap-db-uri',q('#bk-duriIn').value.trim());dbConnect().catch(e=>dbStat(e.message,1));return}await dbUp();dm('Sauvegardé : '+LS('cap-db-last'))}catch(e){dm(e.message,1)}};
+ q('#bk-dres').onclick=async()=>{try{if(!DB.ok()){LS('cap-db-key',q('#bk-dkey').value.trim());LS('cap-db-uri',q('#bk-duriIn').value.trim());dbConnect().catch(e=>dbStat(e.message,1));return}const f=await dbDown();if(!confirm('Remplacer toutes les données actuelles par la sauvegarde Dropbox ?'))return;await restoreBackup(f);dm('Données restaurées, rechargement…');setTimeout(()=>location.reload(),600)}catch(e){dm(e.message,1)}};
  q('#bk-save').onclick=async()=>{try{msg('Fichier enregistré : '+await saveBackup())}catch(e){msg(e.message,1)}};
  q('#bk-share').onclick=async()=>{try{const n=await shareBackup();if(n)msg('Partagé : '+n)}catch(e){msg(e.message,1)}};
  q('#bk-imp').onclick=()=>q('#bk-file').click();
@@ -26125,7 +26159,7 @@ const ZN = /^(\d{4})-(\d{2})-(\d{2})$/, G = {
     },
     formatFr(t) {
         const {year: s, month: i, day: l} = G.toParts(t);
-        return `${String(l).padStart(2, "0")}/${String(i).padStart(2, "0")}/${s}`;
+        return `${String(l).padStart(2, "0")}/${String(i).padStart(2, "0")}/${String(s).slice(-2)}`;
     }
 };
 
@@ -36256,7 +36290,7 @@ function eo() {
     return {
         date: G.today(),
         payeeName: "",
-        categoryName: "",
+        categoryName: "À compléter",
         subcategoryName: "",
         amount: "",
         direction: "DEBIT",
@@ -37070,7 +37104,7 @@ function _b(t) {
         date: G.today(),
         dateLabel: "",
         payee: "",
-        category: "",
+        category: "À compléter",
         subcategory: "",
         amountLabel: "",
         debitLabel: "",
@@ -49469,4 +49503,214 @@ kE.createRoot(document.getElementById("root")).render(n.jsx(Mx.StrictMode, {
         }) ]
     })
 }));
-</script></body></html>
+</script><style>
+.cp-cols-bar{position:relative;display:inline-flex;align-items:center}
+.cp-cols-bar.block{display:flex;justify-content:flex-end;padding:10px 14px 0}
+.cp-cols-btn{font:inherit;font-size:14px;line-height:1;padding:9px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:inherit;cursor:pointer;white-space:nowrap}
+.cp-cols-btn:hover{background:rgba(255,255,255,.1)}
+.cp-cols-pop{position:absolute;right:0;top:calc(100% + 6px);z-index:60;background:#1b2440;color:#e8edf8;border:1px solid #3a4a6b;border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:200px;box-shadow:0 10px 28px rgba(0,0,0,.4)}
+.cp-cols-pop[hidden]{display:none}
+.cp-cols-pop label{font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap}
+.cp-hide{display:none!important}
+@media(max-width:760px){
+ .reg-page .optable tbody tr:not(.op-split-row){display:flex!important;flex-wrap:nowrap!important;align-items:center;gap:10px;grid-template-columns:none!important;padding:12px 14px!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td{grid-area:auto!important;justify-self:auto!important;flex:0 0 auto;white-space:nowrap;text-align:right!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td:nth-child(1){text-align:left!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td:nth-child(2){flex:1 1 0!important;min-width:0;overflow:hidden;text-overflow:ellipsis;text-align:left!important}
+ .reg-page .optable thead{display:block!important}
+ .reg-page .optable thead tr{display:flex!important;flex-wrap:nowrap!important;align-items:center;gap:10px;grid-template-columns:none!important;padding:8px 14px!important}
+ .reg-page .optable thead th{flex:0 0 auto;white-space:nowrap;text-align:right!important;font-size:11px;opacity:.7;text-transform:uppercase;letter-spacing:.02em}
+ .reg-page .optable thead th:nth-child(1){text-align:left!important}
+ .reg-page .optable thead th:nth-child(2){flex:1 1 0!important;min-width:0;overflow:hidden;text-align:left!important}
+ .reg-page .optable thead,.reg-page .optable thead tr{background:none!important;box-shadow:none!important;border-radius:0!important}
+ .reg-page .optable thead tr{border:0!important;border-bottom:1px solid rgba(255,255,255,.08)!important;padding:10px 14px 8px!important}
+ .reg-page .optable thead th{background:none!important;border:0!important;border-radius:0!important;box-shadow:none!important;padding:0!important;height:auto!important;min-height:0!important;line-height:1.2!important;color:var(--text-soft,#9aa6c2)!important;font-weight:600!important;position:static!important}
+}
+.cp-sep td+td,.cp-sep th+th{border-left:1px solid rgba(255,255,255,.07)!important}
+@media(min-width:761px){
+ .ech-cols>*+*,.ech-row>*+*{border-left:1px solid rgba(255,255,255,.07)}
+}
+@media(max-width:760px){
+ .reg-page .optable tbody tr:not(.op-split-row)>td:nth-child(2),.reg-page .optable thead th:nth-child(2){width:0!important;max-width:none!important;flex:1 1 0!important;min-width:0!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td:not(:nth-child(2)),.reg-page .optable thead th:not(:nth-child(2)){width:auto!important;min-width:max-content!important;max-width:none!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td+td{border-left:1px solid rgba(255,255,255,.07)!important;padding-left:10px!important}
+ .reg-page .optable tbody tr:not(.op-split-row){gap:0!important}
+ .reg-page .optable thead th+th{border-left:1px solid rgba(255,255,255,.07)!important;padding-left:10px!important}
+ .reg-page .optable thead tr{gap:0!important}
+}
+@media(max-width:760px){
+ .reg-page .optable tbody tr:not(.op-split-row),.reg-page .optable thead tr{display:grid!important;grid-template-columns:60px minmax(70px,1fr) 62px 62px 62px!important;column-gap:4px!important;row-gap:0!important;align-items:center!important;padding-left:12px!important;padding-right:12px!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td,.reg-page .optable thead th{min-width:0!important;width:auto!important;max-width:none!important;flex:none!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;font-size:12px!important;padding-left:0!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td+td,.reg-page .optable thead th+th{padding-left:4px!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td:nth-child(1),.reg-page .optable thead th:nth-child(1){grid-column:1!important;grid-row:auto!important;text-align:left!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td:nth-child(2),.reg-page .optable thead th:nth-child(2){grid-column:2!important;grid-row:auto!important;text-align:left!important;width:auto!important;flex:none!important;min-width:0!important;overflow:hidden!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td:nth-child(7),.reg-page .optable thead th:nth-child(7){grid-column:3!important;grid-row:auto!important;text-align:right!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td:nth-child(8),.reg-page .optable thead th:nth-child(8){grid-column:4!important;grid-row:auto!important;text-align:right!important}
+ .reg-page .optable tbody tr:not(.op-split-row)>td:nth-child(10),.reg-page .optable thead th:nth-child(10){grid-column:5!important;grid-row:auto!important;text-align:right!important}
+}
+@media(max-width:760px){
+ .ech-cols{display:grid!important;grid-template-columns:60px minmax(70px,1fr) 62px 72px!important;column-gap:4px!important;row-gap:0!important;align-items:center!important;padding:10px 14px 8px!important;border-bottom:1px solid rgba(255,255,255,.08)}
+ .ech-row{display:grid!important;grid-template-columns:60px minmax(70px,1fr) 62px 72px!important;column-gap:4px!important;row-gap:0!important;align-items:center!important;padding:12px 14px!important;text-align:left!important}
+ .ech-cols>*,.ech-row>*{grid-area:auto!important;min-width:0!important;width:auto!important;max-width:none!important;flex:none!important;overflow:hidden!important;white-space:nowrap!important;text-overflow:ellipsis!important;justify-self:stretch!important;font-size:12px!important}
+ .ech-cols>:nth-child(8),.ech-row>:nth-child(8),.ech-row>:nth-child(2),.ech-row>:nth-child(3),.ech-row>:nth-child(6){display:none!important}
+ .ech-cols>:nth-child(1),.ech-row>:nth-child(1){grid-column:1!important;grid-row:1!important;text-align:left!important}
+ .ech-cols>:nth-child(4),.ech-row>:nth-child(4){grid-column:2!important;grid-row:1!important;text-align:left!important}
+ .ech-cols>:nth-child(5),.ech-row>:nth-child(5){grid-column:3!important;grid-row:1!important;text-align:left!important}
+ .ech-cols>:nth-child(7),.ech-row>:nth-child(7){grid-column:4!important;grid-row:1!important;text-align:right!important;justify-self:end!important}
+ .ech-date small{display:none!important}
+ .ech-row .ech-tiers{display:block!important;min-width:0!important}
+ .ech-row .ech-tiers .sub{display:none!important}
+}
+/* Échéancier : même style que le registre (PC) */
+@media(min-width:761px){
+ .ech-cols{padding:10px 14px!important;font:600 11px var(--font-ui);text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);border-bottom:1px solid var(--line)}
+ .ech-row{padding:10px 14px!important;border-bottom:1px solid rgba(255,255,255,.06);font-size:13px}
+}
+/* Échéancier PC : texte décalé des séparateurs, montant aligné à droite */
+@media(min-width:761px){
+ .ech-cols>*+*,.ech-row>*+*{padding-left:14px!important}
+ .ech-cols>:nth-child(7){text-align:right!important;justify-content:flex-end!important}
+ .ech-cols>:nth-child(7) .th-sort{margin-left:auto}
+ .ech-row>:nth-child(7){text-align:right!important;justify-self:end}
+}
+/* Saisie rapide : sans Sous-catégorie ni Moyen de paiement */
+.reg-quickadd colgroup col:nth-child(4),.reg-quickadd colgroup col:nth-child(5){width:0!important;min-width:0!important}
+.reg-quickadd tbody td:nth-child(4),.reg-quickadd tbody td:nth-child(5){display:none!important}
+/* Mobile : bouton Colonnes dans sa bulle, sans raccourci Ctrl F */
+@media(max-width:760px){
+ .cp-kbd{display:none!important}
+ .cp-cols-bar{height:auto!important;max-height:none!important;overflow:visible!important;flex:none!important}
+ .cp-cols-btn{font:600 13px/1.2 var(--font-ui)!important;letter-spacing:0!important;text-transform:none!important;padding:8px 12px!important;white-space:nowrap!important;height:auto!important;min-height:0!important;border-radius:10px!important}
+}
+/* Comptes : cartes plus compactes */
+.acct{padding:16px 20px!important;gap:12px!important}
+.acct .a-bal{font-size:24px!important}
+.acct .a-ico{width:36px!important;height:36px!important}
+.acct .a-foot{padding-top:10px!important}
+@media(max-width:760px){
+ .acct-row{gap:10px!important}
+ .acct{padding:12px 14px!important;gap:8px!important}
+ .acct .a-bal{font-size:21px!important}
+ .acct .a-ico{width:32px!important;height:32px!important}
+ .acct .a-foot{padding-top:8px!important}
+}
+</style>
+<script>
+(function(){
+  const KEY='cp-cols-v1';
+  const ECH=[
+    {k:'sens',n:'Sens',i:2,d:false},{k:'nature',n:'Nature',i:3,d:false},{k:'tiers',n:'Tiers',i:4,d:true},
+    {k:'compte',n:'Compte',i:5,d:true},{k:'note',n:'Note',i:6,d:false},{k:'montant',n:'Montant',i:7,d:true}];
+  const REG=[
+    {k:'tiers',n:'Tiers',h:'Tiers',d:true},{k:'cat',n:'Catégorie',h:'Catégorie',d:false},
+    {k:'sub',n:'Sous-catégorie',h:'Sous-catégorie',d:false},{k:'moyen',n:'Moyen de paiement',h:'Moyen',d:false},
+    {k:'note',n:'Note',h:'Note',d:false},{k:'debit',n:'Débit',h:'Débit',d:true},
+    {k:'credit',n:'Crédit',h:'Crédit',d:true},{k:'r',n:'R (pointage)',h:'R',d:false},{k:'solde',n:'Solde',h:'Solde',d:true}];
+
+  const st=()=>{try{return JSON.parse(localStorage.getItem(KEY)||'{}')}catch(e){return{}}};
+  const vis=(g,k,def)=>{const v=st()[g];return v&&k in v?v[k]:def};
+  const setVis=(g,k,val)=>{const o=st();o[g]=o[g]||{};o[g][k]=val;try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}};
+
+  const regNames=t=>[...t.querySelectorAll('thead th')].map(th=>(th.textContent||'').trim().split(/\s+/)[0]);
+  const isReg=t=>{const n=regNames(t);return n.length>0&&n.includes('Débit')&&n.includes('Crédit')};
+
+  function applyEch(){
+    const hdr=document.querySelector('.ech-cols');if(!hdr)return;
+    const hide=new Set(ECH.filter(c=>!vis('ech',c.k,c.d)).map(c=>c.i));
+    const apply=el=>[...el.children].forEach((c,i)=>{if(hide.has(i+1))c.style.setProperty('display','none','important');else c.style.removeProperty('display')});
+    apply(hdr);
+    document.querySelectorAll('.ech-row').forEach(apply);
+  }
+  function applyReg(){
+    document.querySelectorAll('table').forEach(t=>{
+      if(!isReg(t))return;
+      t.classList.add('cp-sep');
+      t.style.setProperty('width','100%','important');
+      t.style.setProperty('min-width','100%','important');
+      let el=t.parentElement;
+      for(let k=0;k<3&&el&&el!==document.body;k++){
+        const pw=el.parentElement?el.parentElement.clientWidth:0;
+        if(pw&&el.offsetWidth<pw-2)el.style.width='100%';
+        el=el.parentElement;
+      }
+      const names=regNames(t),hide=new Set();
+      REG.forEach(c=>{if(!vis('reg',c.k,c.d)){const i=names.indexOf(c.h);if(i>=0)hide.add(i)}});
+      t.querySelectorAll('thead th').forEach(th=>{
+        if(((th.textContent||'').trim().split(/\s+/)[0])==='Débit')
+          [...th.children].forEach(c=>c.style.setProperty('display','none','important'));
+      });
+      const mob=window.matchMedia('(max-width:760px)').matches;
+      t.querySelectorAll('tr').forEach(tr=>{
+        const flex=mob&&!tr.classList.contains('op-split-row');
+        [...tr.children].forEach((c,i)=>{
+          if(hide.has(i))c.style.setProperty('display','none','important');
+          else c.style.setProperty('display',flex?'block':'table-cell','important');
+        });
+      });
+      t.querySelectorAll('colgroup').forEach(cg=>[...cg.children].forEach((col,i)=>{
+        if(hide.has(i))col.style.setProperty('width','0','important');
+        else col.style.removeProperty('width');
+      }));
+    });
+  }
+  function hideKbd(){
+    document.querySelectorAll('span,kbd,div').forEach(e=>{
+      if(e.dataset.cpKbd||e.children.length)return;
+      if((e.textContent||'').replace(/\s+/g,' ').trim()==='Ctrl F'){e.dataset.cpKbd='1';e.classList.add('cp-kbd')}
+    });
+  }
+  const DET_HIDE=['Sous-catégorie','Moyen','Numéro','Projet','Ventilation'];
+  function hideFields(){
+    document.querySelectorAll('.field').forEach(f=>{
+      const lb=f.querySelector(':scope > .label');if(!lb)return;
+      const w=(lb.textContent||'').replace(/\*/g,'').trim().split(/\s+/)[0];
+      if(DET_HIDE.includes(w))f.style.setProperty('display','none','important');
+      else if(f.style.display==='none')f.style.removeProperty('display');
+    });
+    document.querySelectorAll('.field-row').forEach(r=>{
+      const fields=[...r.children].filter(c=>c.classList.contains('field'));
+      if(!fields.length)return;
+      const any=fields.some(c=>c.style.display!=='none');
+      if(any)r.style.removeProperty('display');else r.style.setProperty('display','none','important');
+    });
+  }
+  const applyAll=()=>{applyEch();applyReg();hideKbd();hideFields()};
+
+  function makeBar(g,list,cls){
+    const w=document.createElement('div');w.className='cp-cols-bar '+cls;w.dataset.cp=g;
+    const b=document.createElement('button');b.type='button';b.className='cp-cols-btn';b.textContent='Colonnes';
+    const p=document.createElement('div');p.className='cp-cols-pop';p.hidden=true;
+    list.forEach(c=>{
+      const l=document.createElement('label'),cb=document.createElement('input');
+      cb.type='checkbox';cb.checked=!!vis(g,c.k,c.d);
+      cb.onchange=()=>{setVis(g,c.k,cb.checked);applyAll()};
+      l.append(cb,' '+c.n);p.append(l);
+    });
+    b.onclick=e=>{e.stopPropagation();p.hidden=!p.hidden};
+    document.addEventListener('click',e=>{if(!w.contains(e.target))p.hidden=true});
+    w.append(b,p);return w;
+  }
+
+  function ensureBars(){
+    if(!document.querySelector('.cp-cols-bar[data-cp=reg]')){
+      const regTable=[...document.querySelectorAll('table')].find(isReg);
+      if(regTable){
+        const anchor=[...document.querySelectorAll('button')].find(b=>/^Période/.test((b.textContent||'').trim()));
+        if(anchor&&anchor.parentElement)anchor.parentElement.insertBefore(makeBar('reg',REG,''),anchor);
+        else regTable.parentElement.insertBefore(makeBar('reg',REG,'block'),regTable);
+      }
+    }
+    if(!document.querySelector('.cp-cols-bar[data-cp=ech]')){
+      const hdr=document.querySelector('.ech-cols');
+      if(hdr)hdr.parentElement.insertBefore(makeBar('ech',ECH,'block'),hdr);
+    }
+  }
+
+  let raf=0;
+  const sched=()=>{if(!raf)raf=requestAnimationFrame(()=>{raf=0;ensureBars();applyAll()})};
+  new MutationObserver(sched).observe(document.body,{childList:true,subtree:true});
+  addEventListener('resize',sched);
+  sched();
+})();
+</script>
+</body></html>
